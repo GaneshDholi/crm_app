@@ -5,18 +5,70 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
-  "section_break_q66d"
+  "call_details_section",
+  "from_number",
+  "call_channel",
+  "column_break_grvj",
+  "to_number",
+  "call_start_time",
+  "column_break_vxsv",
+  "call_type",
+  "call_duration"
  ],
  "fields": [
   {
-   "fieldname": "section_break_q66d",
-   "fieldtype": "Section Break"
+   "fieldname": "call_details_section",
+   "fieldtype": "Section Break",
+   "label": "Call Details"
+  },
+  {
+   "fieldname": "from_number",
+   "fieldtype": "Data",
+   "label": "Call Frome",
+   "permlevel": 1
+  },
+  {
+   "fieldname": "to_number",
+   "fieldtype": "Data",
+   "label": "Call To",
+   "permlevel": 1
+  },
+  {
+   "fieldname": "call_type",
+   "fieldtype": "Select",
+   "label": "Call Type",
+   "options": "Inbound\nOutbound"
+  },
+  {
+   "fieldname": "call_channel",
+   "fieldtype": "Data",
+   "label": "Call Channel"
+  },
+  {
+   "fieldname": "call_start_time",
+   "fieldtype": "Datetime",
+   "label": "Call Start Time",
+   "permlevel": 1
+  },
+  {
+   "fieldname": "call_duration",
+   "fieldtype": "Int",
+   "label": "Call Duration",
+   "permlevel": 1
+  },
+  {
+   "fieldname": "column_break_grvj",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "column_break_vxsv",
+   "fieldtype": "Column Break"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-04-12 17:14:52.470345",
+ "modified": "2026-04-13 01:54:05.339995",
  "modified_by": "Administrator",
  "module": "CRM app",
  "name": "Call Log",
@@ -24,13 +76,34 @@
  "permissions": [
   {
    "create": 1,
-   "delete": 1,
    "email": 1,
    "export": 1,
    "print": 1,
    "read": 1,
    "report": 1,
    "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "permlevel": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales User",
    "share": 1,
    "write": 1
   }

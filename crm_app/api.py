@@ -1,5 +1,6 @@
 import frappe
 from collections import defaultdict
+from frappe.utils import now
 import json
 
 @frappe.whitelist()
@@ -120,69 +121,102 @@ def get_lead_by_number(phone):
     }
 
 
-# -----------------------------
-# 2. ADD CALL ACTIVITY
-# -----------------------------
 @frappe.whitelist(allow_guest=True)
 def add_call_activity():
     data = frappe.local.form_dict
 
-    doc = frappe.get_doc({
-        "doctype": "Call Activity",
-        "lead": data.get("lead"),
-        "user": data.get("user"),
-        "activity_time": data.get("activity_time"),
-        "activity_type": "Call",
-        "comment": data.get("comment"),
-        "status": data.get("status")
+    # 1. Get the 2 fields from the POST request
+    mobile_number = data.get("mobile_number")
+    comment = data.get("comment")
+
+    # Safety check
+    if not mobile_number or not comment:
+        return {"status": "failed", "message": "Mobile number and comment are required."}
+
+    # 2. Find the Lead ID using the mobile number
+    lead_id = frappe.db.get_value("Lead", {"contact_number": mobile_number}, "name")
+    
+    if not lead_id:
+        lead_id = frappe.db.get_value("Lead", {"alternate_contact_number": mobile_number}, "name")
+
+    if not lead_id:
+        return {
+            "status": "not_found", 
+            "message": f"No Lead found in the system for number: {mobile_number}"
+        }
+
+    # 3. Load the existing Lead document
+    lead_doc = frappe.get_doc("Lead", lead_id)
+
+    # 4. Append a new row to the "activity_summary" child table
+    # We use the exact field names from your Client Script!
+    lead_doc.append("activity_summary", {
+        "activity_comment": comment,
+        "comment_by": "Administrator",
+        "activity_time": now()
     })
 
-    doc.insert(ignore_permissions=True)
-
-    return {"status": "success"}
-
-
-# -----------------------------
-# 3. CREATE CALL LOG
-# -----------------------------
-@frappe.whitelist(allow_guest=True)
-def create_call_log():
-    data = json.loads(frappe.request.data)
-
-    from_number = data.get("from_number")
-    to_number = data.get("to_number")
-
-    # Find Lead from numbers
-    lead = frappe.db.get_value("Lead", {"mobile_no": from_number}, "name") \
-        or frappe.db.get_value("Lead", {"mobile_no": to_number}, "name")
-
-    call = frappe.get_doc({
-        "doctype": "Call Log",
-
-        "call_id": data.get("call_id"),
-        "user": data.get("user"),
-
-        "customer_number": to_number,
-        "contact_name": data.get("contact_name"),
-        "lead": lead,
-
-        "call_type": data.get("call_type"),
-        "call_status": data.get("call_status"),
-
-        "call_start_time": data.get("call_start_time"),
-        "call_end_time": data.get("call_end_time"),
-        "call_duration": data.get("call_duration"),
-
-        "call_channel": data.get("call_channel"),
-        "device_id": data.get("device_id"),
-
-        "notes": data.get("notes")
-    })
-
-    call.insert(ignore_permissions=True)
+    # 5. Save the Lead document with the new row
+    lead_doc.save(ignore_permissions=True)
+    
+    # Commit the database changes (Crucial when updating existing docs via external API)
+    frappe.db.commit()
 
     return {
         "status": "success",
-        "call_log_id": call.name,
-        "lead": lead
+        "message": "Activity added to Lead successfully",
+        "lead_id": lead_id
+    }
+
+
+
+@frappe.whitelist(allow_guest=True)
+def create_call_log():
+    try:
+        data = json.loads(frappe.request.data)
+    except Exception:
+        data = frappe.local.form_dict
+
+    from_val = data.get("from_number")
+    to_val = data.get("to_number")
+
+    # --- Helper to find the "Display Name" for the field ---
+    def get_display_name(number):
+        if not number: return "Unknown"
+        
+        # 1. Search Leads
+        lead_name = frappe.db.get_value("Lead", {"contact_number": number}, "name") or \
+                    frappe.db.get_value("Lead", {"alternate_contact_number": number}, "name")
+        if lead_name: return lead_name
+        
+        # 2. Search Sales Person (Ensure your Sales Person DocType has a 'mobile_no' or similar field)
+        sales_name = frappe.db.get_value("Sales Person", {"user": number}, "sales_name") or \
+                     frappe.db.get_value("Sales Person", {"mobile_no": number}, "sales_name")
+        if sales_name: return sales_name
+        
+        return number # Fallback to number if no name is found
+
+    # --- Fetch Names ---
+    display_from = get_display_name(from_val)
+    display_to = get_display_name(to_val)
+
+    # --- Create the Entry with Names in the Number Slots ---
+    doc = frappe.get_doc({
+        "doctype": "Call Logs List",
+        "from_number": display_from,   # Saves "Ganesh" or "Varsha Goyal"
+        "to_number": display_to,       # Saves "Ram" or "Ganesh"
+        "call_type": data.get("call_type"),
+        "call_channel": data.get("call_channel"),
+        "call_start_time": data.get("call_start_time") or now(),
+        "call_duration": data.get("call_duration"),
+        "user": "Administrator"
+    })
+
+    doc.insert(ignore_permissions=True)
+    frappe.db.commit()
+
+    return {
+        "status": "success",
+        "entry": doc.name,
+        "saved_as": f"{display_from} to {display_to}"
     }
