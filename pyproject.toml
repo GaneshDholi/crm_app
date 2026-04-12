@@ -1,0 +1,10 @@
+[project]
+name = "crm_app"
+version = "0.0.1"
+description = "CRM App"
+authors = [{name = "Ganesh", email = "ganeshdholi2000@gmail.com"}]
+dependencies = []
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
