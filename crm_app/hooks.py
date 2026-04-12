@@ -4,6 +4,9 @@ app_publisher = "celebrare"
 app_description = "crm app for the team"
 app_email = "ganeshdholi2000@gmail.com"
 app_license = "mit"
+app_include_css = []
+app_include_js = []
+build_dependencies = []
 
 # Apps
 # ------------------
