@@ -4,8 +4,8 @@ app_publisher = "celebrare"
 app_description = "crm app for the team"
 app_email = "ganeshdholi2000@gmail.com"
 app_license = "mit"
-app_include_css = []
-app_include_js = []
+app_include_js = "/assets/crm_app/js/app.js"
+app_include_css = "/assets/crm_app/css/app.css"
 build_dependencies = []
 
 # Apps
