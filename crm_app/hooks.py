@@ -7,6 +7,7 @@ app_license = "mit"
 app_include_js = "/assets/crm_app/js/app.js"
 app_include_css = "/assets/crm_app/css/app.css"
 build_dependencies = []
+before_request = ["crm_app.api.intercept_magic_date"]
 
 # Apps
 # ------------------

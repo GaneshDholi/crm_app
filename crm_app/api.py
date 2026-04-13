@@ -1,6 +1,6 @@
 import frappe
 from collections import defaultdict
-from frappe.utils import now
+from frappe.utils import now,today
 import json
 
 @frappe.whitelist()
@@ -91,6 +91,47 @@ def get_lead_report_data(filters=None):
         "data": result
     }
 
+def intercept_magic_date():
+    # 1. Safety check: Ensure we have a form dictionary in the request
+    if not hasattr(frappe.local, 'form_dict') or not frappe.local.form_dict:
+        return
+
+    # 2. Scope check: We only want to run this for CRM Leads to save server resources
+    req_path = frappe.request.path.lower() if frappe.request else ""
+    if "lead" not in req_path and frappe.local.form_dict.get('doctype') != 'CRM Lead':
+        return
+
+    # 3. Intercept direct URL parameters: ?next_contact_date=1111-11-11
+    if frappe.local.form_dict.get("next_contact_date") == "1111-11-11":
+        frappe.local.form_dict["next_contact_date"] = today()
+
+    # 4. Intercept standard Frappe API JSON filters (used by the Vue frontend)
+    filters = frappe.local.form_dict.get("filters")
+    if filters:
+        try:
+            if isinstance(filters, str):
+                parsed = json.loads(filters)
+                modified = False
+                
+                # Handle Array Format: [["CRM Lead", "next_contact_date", "=", "1111-11-11"]]
+                if isinstance(parsed, list):
+                    for f in parsed:
+                        if len(f) >= 4 and f[1] == "next_contact_date" and f[3] == "1111-11-11":
+                            f[3] = today()
+                            modified = True
+                
+                # Handle Dictionary Format: {"next_contact_date": "1111-11-11"}
+                elif isinstance(parsed, dict):
+                    if parsed.get("next_contact_date") == "1111-11-11":
+                        parsed["next_contact_date"] = today()
+                        modified = True
+                        
+                # If we swapped the date, repackage the JSON and inject it back into the request
+                if modified:
+                    frappe.local.form_dict["filters"] = json.dumps(parsed)
+        except Exception:
+            # If the filter isn't valid JSON, fail silently and let Frappe handle it normally
+            pass
 
 @frappe.whitelist(allow_guest=True)
 def get_lead_by_number(phone):
