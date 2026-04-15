@@ -96,17 +96,17 @@ def get_data(filters):
     timeline = []
 
     # CALLS
-    for c in calls:
-        if not c.call_start_time:
-            continue
+    # for c in calls:
+    #     if not c.call_start_time:
+    #         continue
 
-        timeline.append({
-            "time": c.call_start_time,
-            "user": c.from_number or "Unknown",
-            "doctype": "Lead",
-            "docname": c.lead_id,
-            "action": f"Call Log: {c.call_type}, Duration: {c.call_duration}"
-        })
+    #     timeline.append({
+    #         "time": c.call_start_time,
+    #         "user": c.from_number or "Unknown",
+    #         "doctype": "Lead",
+    #         "docname": c.lead_id,
+    #         "action": f"Call Log: {c.call_type}, Duration: {c.call_duration}"
+    #     })
 
     # ACTIVITIES
     for a in activities:
@@ -118,7 +118,7 @@ def get_data(filters):
 
         user_val = a.comment_by or a.owner or "Unknown"
 
-        if full_name and user_val != activity_user:
+        if full_name and user_val not in [activity_user, full_name]:
             continue
 
         timeline.append({
@@ -187,13 +187,18 @@ def get_data(filters):
         if date_val != last_date:
             data.append({"activity": str(date_val), "indent": 1})
             last_date = date_val
+            prev_time = None   # FIX
 
-        # IDLE TIME
+        # IDLE TIME (FIXED)
         idle = ""
         if prev_time:
-            diff = (prev_time - dt).total_seconds() / 60
-            if diff >= 0:
-                idle = f"{int(diff)} Mins"
+            # only calculate within same user & same date
+            if user == last_user and date_val == last_date:
+                diff = (prev_time - dt).total_seconds() / 60
+
+                # avoid huge wrong values
+                if 0 <= diff <= 120:
+                    idle = f"{int(diff)} Mins"
 
         prev_time = dt
 
