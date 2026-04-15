@@ -118,7 +118,7 @@ def get_data(filters):
 
         user_val = a.comment_by or a.owner or "Unknown"
 
-        if full_name and user_val not in [activity_user, full_name]:
+        if full_name and user_val != activity_user:
             continue
 
         timeline.append({
