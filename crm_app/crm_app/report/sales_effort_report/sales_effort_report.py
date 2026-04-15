@@ -27,11 +27,20 @@ def get_data(filters):
     date_val = str(filters.get("date") or "today").lower()
 
     if date_val == "today":
-        target_date = getdate(today())
+        date_from = getdate(today())
+        date_to = date_from
+
     elif date_val == "yesterday":
-        target_date = getdate(add_days(today(), -1))
+        date_from = getdate(add_days(today(), -1))
+        date_to = date_from
+
+    elif "7" in date_val:  # last 7 days
+        date_to = getdate(today())
+        date_from = getdate(add_days(today(), -6))
+
     else:
-        target_date = getdate(filters.get("date"))
+        date_from = getdate(filters.get("date"))
+        date_to = date_from
 
     # ---------------- USER FILTER ----------------
     activity_user = filters.get("activity_user")
@@ -41,8 +50,15 @@ def get_data(filters):
         full_name = frappe.db.get_value("User", activity_user, "full_name") or ""
 
     # ---------------- CALL LOGS ----------------
-    call_conditions = "DATE(call_start_time) = %(date)s AND call_start_time IS NOT NULL"
-    params = {"date": target_date}
+    call_conditions = """
+        DATE(call_start_time) BETWEEN %(from)s AND %(to)s
+        AND call_start_time IS NOT NULL
+    """
+
+    params = {
+        "from": date_from,
+        "to": date_to
+    }
 
     if full_name:
         call_conditions += " AND from_number = %(user)s"
@@ -57,98 +73,119 @@ def get_data(filters):
             call_start_time
         FROM `tabCall Logs List`
         WHERE {call_conditions}
-        ORDER BY call_start_time DESC
     """, params, as_dict=True)
 
     # ---------------- ACTIVITIES ----------------
-    activity_filters = {
-        "activity_time": ["!=", None]
-    }
-
     activities = frappe.get_list(
         "Lead Activity",
         fields=["activity_time", "activity_comment", "comment_by", "owner"],
-        filters=activity_filters,
-        limit=500
+        filters={"activity_time": ["!=", None]},
+        limit=1000
     )
 
-    # filter by date + user manually (important)
-    filtered_activities = []
-    for a in activities:
-        if not a.activity_time:
-            continue
+    # ---------------- LEAD CHANGES (IMPORTANT) ----------------
+    # this brings "Next Contact Date" logs
+    lead_changes = frappe.get_all(
+        "Version",
+        filters={"ref_doctype": "Lead"},
+        fields=["creation", "data", "owner"],
+        limit=1000
+    )
 
-        if getdate(a.activity_time) != target_date:
-            continue
-
-        if full_name:
-            user_val = a.comment_by or a.owner or ""
-            if user_val != activity_user:
-                continue
-
-        filtered_activities.append(a)
-
-    # ---------------- MERGE ----------------
+    # ---------------- BUILD TIMELINE ----------------
     timeline = []
 
+    # CALLS
     for c in calls:
         if not c.call_start_time:
             continue
 
         timeline.append({
             "time": c.call_start_time,
-            "type": "call",
             "user": c.from_number or "Unknown",
-            "data": c
+            "doctype": "Lead",
+            "docname": c.lead_id,
+            "action": f"Call Log: {c.call_type}, Duration: {c.call_duration}"
         })
 
-    for a in filtered_activities:
+    # ACTIVITIES
+    for a in activities:
+        if not a.activity_time:
+            continue
+
+        if not (date_from <= getdate(a.activity_time) <= date_to):
+            continue
+
+        user_val = a.comment_by or a.owner or "Unknown"
+
+        if full_name and user_val != activity_user:
+            continue
+
         timeline.append({
             "time": a.activity_time,
-            "type": "activity",
-            "user": a.comment_by or a.owner or "Unknown",
-            "data": a
+            "user": user_val,
+            "doctype": "Lead",
+            "docname": "",
+            "action": f"Activity: {a.activity_comment}"
         })
 
-    # ---------------- SAFE SORT ----------------
+    # NEXT CONTACT DATE CHANGES 🔥
+    import json
+
+    for v in lead_changes:
+        if not v.data:
+            continue
+
+        try:
+            d = json.loads(v.data)
+        except:
+            continue
+
+        if not d.get("changed"):
+            continue
+
+        for change in d.get("changed", []):
+            if "contact" in change[0].lower():
+                timeline.append({
+                    "time": v.creation,
+                    "user": v.owner or "Unknown",
+                    "doctype": "Lead",
+                    "docname": "",
+                    "action": f"Next Contact Date: {change[1]} → {change[2]}"
+                })
+
+    # ---------------- SORT ----------------
     timeline = sorted(
         timeline,
-        key=lambda x: x.get("time") or now_datetime(),
+        key=lambda x: x["time"] or frappe.utils.now_datetime(),
         reverse=True
     )
 
-    # ---------------- TREE BUILD ----------------
+    # ---------------- TREE ----------------
     last_user = None
     last_date = None
     prev_time = None
 
     for row in timeline:
 
-        if not row.get("time"):
+        dt = row["time"]
+        if not dt:
             continue
 
-        user = row.get("user") or "Unknown"
-        dt = row["time"]
-
+        user = row["user"]
         date_val = getdate(dt)
         time_str = dt.strftime("%H:%M")
 
-        # USER LEVEL
+        # USER
         if user != last_user:
-            data.append({
-                "activity": f"▶ {user}",
-                "indent": 0
-            })
+            data.append({"activity": f"▶ {user}", "indent": 0})
             last_user = user
             last_date = None
-            prev_time = None   # reset idle on new user
+            prev_time = None
 
-        # DATE LEVEL
+        # DATE
         if date_val != last_date:
-            data.append({
-                "activity": str(date_val),
-                "indent": 1
-            })
+            data.append({"activity": str(date_val), "indent": 1})
             last_date = date_val
 
         # IDLE TIME
@@ -160,25 +197,13 @@ def get_data(filters):
 
         prev_time = dt
 
-        # ACTION + DOC
-        if row["type"] == "call":
-            d = row["data"]
-            action = f"Call Log: {d.call_type or ''}, Duration: {d.call_duration or 0}"
-            doc = d.lead_id or ""
-            doctype = "Lead"
-        else:
-            d = row["data"]
-            action = f"Activity: {d.activity_comment or ''}"
-            doc = ""
-            doctype = "Lead"
-
         # FINAL ROW
         data.append({
             "activity": time_str,
             "idle_time": idle,
-            "doctype": doctype,
-            "docname": doc,
-            "action": action,
+            "doctype": row["doctype"],
+            "docname": row["docname"],
+            "action": row["action"],
             "indent": 2
         })
 

@@ -1,6 +1,7 @@
 import frappe
 from collections import defaultdict
 
+
 def execute(filters=None):
     filters = filters or {}
 
@@ -8,7 +9,7 @@ def execute(filters=None):
         {"label": "Pivot Tree", "fieldname": "pivot", "fieldtype": "Data", "width": 300},
         {"label": "Count", "fieldname": "count", "fieldtype": "Int", "width": 100},
         {"label": "Repeat", "fieldname": "repeat", "fieldtype": "Check", "width": 80},
-        {"label": "Activities", "fieldname": "activities", "fieldtype": "Data", "width": 250},
+        {"label": "Activities", "fieldname": "activities", "fieldtype": "Small Text", "width": 300},
         {"label": "Contact No.", "fieldname": "contact_number", "fieldtype": "Data", "width": 150},
         {"label": "Created", "fieldname": "creation", "fieldtype": "Datetime", "width": 150},
         {"label": "Open Days", "fieldname": "open_days", "fieldtype": "Int", "width": 100},
@@ -38,7 +39,7 @@ def execute(filters=None):
     if where_clause:
         where_clause = "WHERE " + where_clause
 
-    # ---------------- DATA FETCH ---------------- #
+    # ---------------- FETCH LEADS ---------------- #
     leads = frappe.db.sql(f"""
         SELECT 
             l.name,
@@ -49,16 +50,6 @@ def execute(filters=None):
             l.creation,
             DATEDIFF(CURDATE(), l.creation) as open_days,
 
-            -- 🔥 ACTIVITY (last comment)
-            (
-                SELECT a.activity_comment
-                FROM `tabLead Activity` a
-                WHERE a.parent = l.name
-                ORDER BY a.activity_time DESC
-                LIMIT 1
-            ) as last_activity,
-
-            -- 🔥 REPEAT (same contact count)
             (
                 SELECT COUNT(*) 
                 FROM `tabLead` l2 
@@ -72,8 +63,48 @@ def execute(filters=None):
         ORDER BY l.creation DESC
     """, values, as_dict=True)
 
-    # ---------------- DYNAMIC HIERARCHY ---------------- #
-    # Default: 3-level hierarchy (shallower tree, more visible by default)
+    # ---------------- GET ALL ACTIVITIES + CALLS ---------------- #
+    def get_activities_map(leads):
+        activity_map = defaultdict(list)
+
+        lead_names = [l.name for l in leads]
+        if not lead_names:
+            return activity_map
+
+        # Lead Activities
+        activities = frappe.get_all(
+            "Lead Activity",
+            filters={"parent": ["in", lead_names]},
+            fields=["parent", "activity_comment", "activity_time"],
+            order_by="activity_time desc"
+        )
+
+        # Call Logs
+        calls = frappe.db.sql("""
+            SELECT lead_id, call_type, call_duration, call_start_time
+            FROM `tabCall Logs List`
+            WHERE lead_id IN %(leads)s
+        """, {"leads": lead_names}, as_dict=True)
+
+        # Merge Activities
+        for a in activities:
+            if not a.activity_time:
+                continue
+            txt = f"[{a.activity_time.strftime('%d-%b-%Y %I:%M %p')}] {a.activity_comment or ''}"
+            activity_map[a.parent].append(txt)
+
+        # Merge Calls
+        for c in calls:
+            if not c.call_start_time:
+                continue
+            txt = f"[{c.call_start_time.strftime('%d-%b-%Y %I:%M %p')}] Call {c.call_type}, {c.call_duration or 0}s"
+            activity_map[c.lead_id].append(txt)
+
+        return activity_map
+
+    activity_map = get_activities_map(leads)
+
+    # ---------------- TREE BUILD ---------------- #
     hierarchy = filters.get("lead_details") or "Lead Owner/Date/Lead Name"
     levels = hierarchy.split("/")
 
@@ -103,9 +134,10 @@ def execute(filters=None):
         for key, group in grouped.items():
             node_id = f"{parent or 'root'}::{key}"
 
-            # Leaf level (show details)
             if level_index == len(levels) - 1:
                 for row in group:
+                    activities_text = "\n".join(activity_map.get(row.get("name"), [])) or "-"
+
                     data.append({
                         "pivot": row.get("name"),
                         "indent": indent,
@@ -116,10 +148,9 @@ def execute(filters=None):
                         "open_days": row.get("open_days"),
                         "lcd": "N/A",
                         "repeat": 1 if row.get("repeat_count", 0) > 0 else None,
-                        "activities": row.get("last_activity") or "-"
+                        "activities": activities_text
                     })
             else:
-                # Add node (only for non-leaf levels)
                 data.append({
                     "pivot": key,
                     "indent": indent,
@@ -129,7 +160,6 @@ def execute(filters=None):
                 })
                 build_tree(group, level_index + 1, node_id, indent + 1)
 
-    # Build tree
     build_tree(leads)
 
     return columns, data
