@@ -118,8 +118,13 @@ def get_data(filters):
 
         user_val = a.comment_by or a.owner or "Unknown"
 
-        if full_name and user_val != activity_user:
-            continue
+        if activity_user:
+            if not (
+                user_val == activity_user
+                or user_val == full_name
+                or (user_val and activity_user in user_val)
+            ):
+                continue
 
         timeline.append({
             "time": a.activity_time,

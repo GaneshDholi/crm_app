@@ -8,17 +8,25 @@ def get_lead_report_data(filters=None):
 
     filters = frappe.parse_json(filters) if filters else {}
 
-    leads = frappe.get_all(
-        "Lead",
-        fields=[
-            "name",
-            "contact_name",
-            "contact_number",
-            "lead_owner",
-            "lead_stage",
-            "creation"
-        ]
-    )
+    leads = frappe.db.sql("""
+        SELECT 
+            l.name,
+            l.contact_name,
+            l.contact_number,
+            l.lead_owner,
+            l.lead_stage,
+            l.creation,
+            GROUP_CONCAT(
+                a.activity_comment
+                ORDER BY a.activity_time ASC
+                SEPARATOR ', '
+            ) as all_activities
+        FROM `tabLead` l
+        LEFT JOIN `tabActivity Summary` a ON a.parent = l.name
+        WHERE l.docstatus < 2
+        GROUP BY l.name
+        ORDER BY l.creation DESC
+    """, as_dict=True)
 
     tree = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
 
@@ -209,7 +217,51 @@ def add_call_activity():
         "lead_id": lead_id
     }
 
+@frappe.whitelist()
+def get_leads_with_activities(filters=None):
+    """
+    Returns leads with all activities merged in one column.
+    No duplicate rows - each lead appears only ONCE.
+    Activities shown as: "called and shared details, called but said purchase tomorrow"
+    """
+    
+    # Build WHERE clause from filters
+    conditions = ""
+    if filters:
+        filters = frappe.parse_json(filters) if isinstance(filters, str) else filters
+        
+        if filters.get("lead_owner"):
+            conditions += f" AND l.lead_owner = '{filters.get('lead_owner')}'"
+        if filters.get("lead_stage"):
+            conditions += f" AND l.lead_stage = '{filters.get('lead_stage')}'"
+        if filters.get("source"):
+            conditions += f" AND l.source = '{filters.get('source')}'"
 
+    leads = frappe.db.sql(f"""
+        SELECT 
+            l.name,
+            l.lead_owner,
+            l.contact_number,
+            l.source,
+            l.lead_stage,
+            l.next_contact_date,
+            l.warmth,
+            l.sales_person,
+            l.lead_owner_name,
+            GROUP_CONCAT(
+                a.activity_comment
+                ORDER BY a.activity_time ASC
+                SEPARATOR ', '
+            ) as all_activities
+        FROM `tabLead` l
+        LEFT JOIN `tabActivity Summary` a ON a.parent = l.name
+        WHERE l.docstatus < 2
+        {conditions}
+        GROUP BY l.name
+        ORDER BY l.creation DESC
+    """, as_dict=True)
+
+    return leads
 
 @frappe.whitelist(allow_guest=True)
 def create_call_log():
