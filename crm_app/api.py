@@ -5,27 +5,28 @@ import json
 
 @frappe.whitelist()
 def get_lead_report_data(filters=None):
-
     filters = frappe.parse_json(filters) if filters else {}
 
+    # 1. GROUP BY l.contact_number to merge duplicate numbers into one row
+    # We use MAX() for other fields to prevent SQL errors when grouping
     leads = frappe.db.sql("""
         SELECT 
-            l.name,
-            l.contact_name,
+            MAX(l.name) as name,
+            MAX(l.contact_name) as contact_name,
             l.contact_number,
-            l.lead_owner,
-            l.lead_stage,
-            l.creation,
+            MAX(l.lead_owner) as lead_owner,
+            MAX(l.lead_stage) as lead_stage,
+            MAX(l.creation) as creation,
             GROUP_CONCAT(
-                a.activity_comment
+                DISTINCT a.activity_comment
                 ORDER BY a.activity_time ASC
-                SEPARATOR ', '
+                SEPARATOR ' &#10; ' 
             ) as all_activities
         FROM `tabLead` l
         LEFT JOIN `tabActivity Summary` a ON a.parent = l.name
         WHERE l.docstatus < 2
-        GROUP BY l.name
-        ORDER BY l.creation DESC
+        GROUP BY l.contact_number
+        ORDER BY MAX(l.creation) DESC
     """, as_dict=True)
 
     tree = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
@@ -40,9 +41,7 @@ def get_lead_report_data(filters=None):
     result = []
 
     for owner, dates in tree.items():
-
         owner_id = f"owner::{owner}"
-
         owner_count = sum(len(stages) for d in dates.values() for stages in d.values())
 
         result.append({
@@ -54,9 +53,7 @@ def get_lead_report_data(filters=None):
         })
 
         for date, stages in dates.items():
-
             date_id = f"{owner_id}::date::{date}"
-
             date_count = sum(len(s) for s in stages.values())
 
             result.append({
@@ -68,7 +65,6 @@ def get_lead_report_data(filters=None):
             })
 
             for stage, leads_list in stages.items():
-
                 stage_id = f"{date_id}::stage::{stage}"
 
                 result.append({
@@ -80,21 +76,42 @@ def get_lead_report_data(filters=None):
                 })
 
                 for lead in leads_list:
+                    # 2. Extract activities and build an HTML box with a hover tooltip
+                    activities = lead.get("all_activities") or "No Activities"
+                    
+                    # The 'title' attribute acts as the hover tooltip in standard HTML
+                    tooltip_html = f'''
+                        <div title="{activities}" 
+                             style="cursor: help; 
+                                    background-color: #f4f5f7; 
+                                    padding: 4px 8px; 
+                                    border-radius: 4px; 
+                                    white-space: nowrap; 
+                                    overflow: hidden; 
+                                    text-overflow: ellipsis; 
+                                    max-width: 250px;">
+                            {activities}
+                        </div>
+                    '''
+
                     result.append({
                         "pivot": lead.get("name"),
                         "indent": 3,
                         "parent": stage_id,
                         "id": f"{stage_id}::{lead.get('name')}",
                         "contact_number": lead.get("contact_number"),
-                        "contact_name": lead.get("contact_name")
+                        "contact_name": lead.get("contact_name"),
+                        "activities": tooltip_html  # <-- Add the HTML to the row data
                     })
 
+    # 3. Add the "Activities" column and set its fieldtype to "HTML"
     return {
         "columns": [
             {"label": "Pivot Tree", "fieldname": "pivot", "fieldtype": "Data", "width": 300},
             {"label": "Count", "fieldname": "count", "fieldtype": "Int", "width": 100},
             {"label": "Contact No.", "fieldname": "contact_number", "fieldtype": "Data", "width": 150},
-            {"label": "Contact Name", "fieldname": "contact_name", "fieldtype": "Data", "width": 150}
+            {"label": "Contact Name", "fieldname": "contact_name", "fieldtype": "Data", "width": 150},
+            {"label": "Activities", "fieldname": "activities", "fieldtype": "HTML", "width": 250} # <-- New Column
         ],
         "data": result
     }
