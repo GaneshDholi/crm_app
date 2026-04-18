@@ -26,7 +26,7 @@ def parse_datetime_safe(val):
     if hasattr(val, 'hour'):
         return val
     s = str(val).strip()[:19]
-    for fmt in ("%d-%m-%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%d-%m-%Y %H:%M:%S", "%Y-%m-%d"):
         try:
             return datetime.strptime(s, fmt)
         except Exception:
@@ -35,17 +35,14 @@ def parse_datetime_safe(val):
 
 
 def parse_duration_to_secs(raw):
-    """Parse call_duration like '5s', '1m30s', '90', '1:30' → seconds."""
     if not raw:
         return 0
     s = str(raw).strip()
-    # "5s" or "90s"
     if s.endswith("s") and "m" not in s:
         try:
             return int(s[:-1])
         except:
             return 0
-    # "1m30s" or "1m"
     if "m" in s:
         try:
             parts = s.replace("s", "").split("m")
@@ -54,7 +51,6 @@ def parse_duration_to_secs(raw):
             return mins * 60 + secs
         except:
             return 0
-    # "1:30" or "0:05"
     if ":" in s:
         parts = s.split(":")
         try:
@@ -64,7 +60,6 @@ def parse_duration_to_secs(raw):
                 return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
         except:
             return 0
-    # plain number
     try:
         return int(float(s))
     except:
@@ -93,112 +88,113 @@ def get_data(filters):
         date_from = getdate(today())
         date_to   = date_from
 
+    dt_from = str(date_from) + " 00:00:00"
+    dt_to   = str(date_to)   + " 23:59:59"
+
     # ── USER FILTER ──────────────────────────────────────────────────────────
-    activity_user        = filters.get("activity_user") or ""
-    full_name            = ""
+    activity_user = filters.get("activity_user") or ""
+    full_name     = ""
     if activity_user:
         full_name = frappe.db.get_value("User", activity_user, "full_name") or ""
 
-    # ── CALL LOGS ────────────────────────────────────────────────────────────
-    # call_start_time stored as DD-MM-YYYY HH:MM:SS string
-    call_conditions = """
-        STR_TO_DATE(call_start_time, '%d-%m-%Y %H:%i:%s')
-            BETWEEN %(from)s AND %(to)s
-        AND call_start_time IS NOT NULL
-        AND call_start_time != ''
+    # ── ACTIVITIES via raw SQL (frappe.get_list fails on child table filters) ─
+    act_sql = """
+        SELECT
+            activity_time,
+            activity_comment,
+            comment_by,
+            owner,
+            parent
+        FROM `tabLead Activity`
+        WHERE
+            parenttype = 'Lead'
+            AND activity_time BETWEEN %(dt_from)s AND %(dt_to)s
     """
-    call_params = {
-        "from": str(date_from) + " 00:00:00",
-        "to":   str(date_to)   + " 23:59:59"
-    }
+    act_params = {"dt_from": dt_from, "dt_to": dt_to}
 
-    if activity_user and full_name:
-        # call_from stores Full Name ("Varsha Goyal")
-        call_conditions += " AND call_from = %(call_from_name)s"
-        call_params["call_from_name"] = full_name
+    if activity_user:
+        act_sql += " AND comment_by = %(comment_by)s"
+        act_params["comment_by"] = activity_user
+
+    act_sql += " ORDER BY activity_time DESC LIMIT 2000"
 
     try:
-        call_logs = frappe.db.sql(f"""
-            SELECT
-                call_from,
-                lead_id,
-                call_type,
-                call_duration,
-                call_start_time
-            FROM `tabCall Logs List`
-            WHERE {call_conditions}
-            ORDER BY STR_TO_DATE(call_start_time, '%d-%m-%Y %H:%i:%s') DESC
-            LIMIT 2000
-        """, call_params, as_dict=True)
+        activities = frappe.db.sql(act_sql, act_params, as_dict=True)
+    except Exception as e:
+        frappe.log_error(f"Sales Effort Report – Activities fetch failed: {e}")
+        activities = []
+
+    # ── CALL LOGS ────────────────────────────────────────────────────────────
+    call_sql = """
+        SELECT
+            call_from,
+            lead_id,
+            call_type,
+            call_duration,
+            call_start_time
+        FROM `tabCall Logs List`
+        WHERE
+            STR_TO_DATE(call_start_time, '%%d-%%m-%%Y %%H:%%i:%%s')
+                BETWEEN %(dt_from)s AND %(dt_to)s
+            AND call_start_time IS NOT NULL
+            AND call_start_time != ''
+    """
+    call_params = {"dt_from": dt_from, "dt_to": dt_to}
+
+    if activity_user and full_name:
+        call_sql += " AND call_from = %(call_from_name)s"
+        call_params["call_from_name"] = full_name
+
+    call_sql += " ORDER BY STR_TO_DATE(call_start_time, '%%d-%%m-%%Y %%H:%%i:%%s') DESC LIMIT 2000"
+
+    try:
+        call_logs = frappe.db.sql(call_sql, call_params, as_dict=True)
     except Exception as e:
         frappe.log_error(f"Sales Effort Report – Call Logs fetch failed: {e}")
         call_logs = []
 
-    # ── BUILD CALL DURATION MAP ───────────────────────────────────────────────
-    # keyed by full_name since call_from stores full name
-    call_duration_map = {}
+    # ── VERSION LOG ──────────────────────────────────────────────────────────
+    ver_sql = """
+        SELECT creation, data, owner, docname
+        FROM `tabVersion`
+        WHERE
+            ref_doctype = 'Lead'
+            AND creation BETWEEN %(dt_from)s AND %(dt_to)s
+    """
+    ver_params = {"dt_from": dt_from, "dt_to": dt_to}
+
+    if activity_user:
+        ver_sql += " AND owner = %(owner)s"
+        ver_params["owner"] = activity_user
+
+    ver_sql += " ORDER BY creation DESC LIMIT 2000"
+
+    try:
+        lead_changes = frappe.db.sql(ver_sql, ver_params, as_dict=True)
+    except Exception as e:
+        frappe.log_error(f"Sales Effort Report – Version fetch failed: {e}")
+        lead_changes = []
+
+    # ── CALL DURATION MAP ─────────────────────────────────────────────────────
+    call_duration_map = {}  # full_name → list of {start, duration_secs}
 
     for c in call_logs:
         if not c.call_start_time:
             continue
-
         user_key      = c.call_from or "Unknown"
         start_dt      = parse_datetime_safe(c.call_start_time)
         duration_secs = parse_duration_to_secs(c.call_duration)
 
         if user_key not in call_duration_map:
             call_duration_map[user_key] = []
-
         if start_dt:
             call_duration_map[user_key].append({
                 "start":         start_dt,
                 "duration_secs": duration_secs
             })
 
-    # ── ACTIVITIES ───────────────────────────────────────────────────────────
-    act_filters = {
-        "parenttype":    "Lead",
-        "activity_time": ["between", [str(date_from), str(date_to)]]
-    }
-    if activity_user:
-        act_filters["comment_by"] = activity_user   # stores email
-
-    try:
-        activities = frappe.get_list(
-            "Lead Activity",
-            fields=["activity_time", "activity_comment", "comment_by", "owner", "parent"],
-            filters=act_filters,
-            limit=2000,
-            order_by="activity_time desc"
-        )
-    except Exception as e:
-        frappe.log_error(f"Sales Effort Report – Lead Activity fetch failed: {e}")
-        activities = []
-
-    # ── VERSION LOG ──────────────────────────────────────────────────────────
-    ver_filters = {
-        "ref_doctype": "Lead",
-        "creation": ["between", [
-            str(date_from) + " 00:00:00",
-            str(date_to)   + " 23:59:59"
-        ]]
-    }
-    if activity_user:
-        ver_filters["owner"] = activity_user
-
-    try:
-        lead_changes = frappe.get_all(
-            "Version",
-            filters=ver_filters,
-            fields=["creation", "data", "owner", "docname"],
-            limit=2000
-        )
-    except Exception as e:
-        frappe.log_error(f"Sales Effort Report – Version fetch failed: {e}")
-        lead_changes = []
-
     # ── BUILD TIMELINE ────────────────────────────────────────────────────────
-    timeline       = []
+    timeline        = []
     user_name_cache = {}
 
     def get_display_name(email):
@@ -208,19 +204,22 @@ def get_data(filters):
             user_name_cache[email] = frappe.db.get_value("User", email, "full_name") or email
         return user_name_cache[email]
 
+    # Activities
     for a in activities:
         if not a.activity_time:
             continue
         email    = a.comment_by or a.owner or ""
+        disp     = get_display_name(email)
         timeline.append({
-            "time":       a.activity_time,
-            "user":       get_display_name(email),
-            "user_key":   get_display_name(email),   # full name → matches call_duration_map key
-            "doctype":    "Lead",
-            "docname":    a.get("parent") or "",
-            "action":     a.activity_comment or "",
+            "time":     a.activity_time,
+            "user":     disp,
+            "user_key": disp,
+            "doctype":  "Lead",
+            "docname":  a.parent or "",
+            "action":   a.activity_comment or "",
         })
 
+    # Version log
     for v in lead_changes:
         if not v.data:
             continue
@@ -233,12 +232,13 @@ def get_data(filters):
             old_val    = change[1]
             new_val    = change[2]
             email      = v.owner or ""
+            disp       = get_display_name(email)
             timeline.append({
                 "time":     v.creation,
-                "user":     get_display_name(email),
-                "user_key": get_display_name(email),
+                "user":     disp,
+                "user_key": disp,
                 "doctype":  "Lead",
-                "docname":  v.get("docname") or "",
+                "docname":  v.docname or "",
                 "action":   f"{field_name}: {old_val} → {new_val}",
             })
 
@@ -257,8 +257,8 @@ def get_data(filters):
             continue
 
         dt        = parse_datetime_safe(dt) or dt
-        user      = row["user"]       # full name for display
-        user_key  = row["user_key"]   # full name for call map lookup
+        user      = row["user"]
+        user_key  = row["user_key"]
         row_date  = getdate(dt)
         time_str  = dt.strftime("%H:%M")
 
@@ -282,7 +282,7 @@ def get_data(filters):
                 "idle_time": "", "doctype": "", "docname": "", "action": ""
             })
             last_row_date = row_date
-            prev_time     = None   # reset — prevents cross-date idle bug
+            prev_time     = None
             prev_row_user = None
 
         # ── IDLE TIME ──
