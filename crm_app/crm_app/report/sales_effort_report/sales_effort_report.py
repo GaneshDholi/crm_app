@@ -21,17 +21,54 @@ def get_columns():
 
 
 def parse_datetime_safe(val):
-    """Parse datetime from string safely, return None if fails."""
     if not val:
         return None
     if hasattr(val, 'hour'):
         return val
+    s = str(val).strip()[:19]
     for fmt in ("%d-%m-%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
-            return datetime.strptime(str(val).strip(), fmt)
+            return datetime.strptime(s, fmt)
         except Exception:
             continue
     return None
+
+
+def parse_duration_to_secs(raw):
+    """Parse call_duration like '5s', '1m30s', '90', '1:30' → seconds."""
+    if not raw:
+        return 0
+    s = str(raw).strip()
+    # "5s" or "90s"
+    if s.endswith("s") and "m" not in s:
+        try:
+            return int(s[:-1])
+        except:
+            return 0
+    # "1m30s" or "1m"
+    if "m" in s:
+        try:
+            parts = s.replace("s", "").split("m")
+            mins = int(parts[0]) if parts[0] else 0
+            secs = int(parts[1]) if len(parts) > 1 and parts[1] else 0
+            return mins * 60 + secs
+        except:
+            return 0
+    # "1:30" or "0:05"
+    if ":" in s:
+        parts = s.split(":")
+        try:
+            if len(parts) == 2:
+                return int(parts[0]) * 60 + int(parts[1])
+            elif len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+        except:
+            return 0
+    # plain number
+    try:
+        return int(float(s))
+    except:
+        return 0
 
 
 def get_data(filters):
@@ -57,50 +94,74 @@ def get_data(filters):
         date_to   = date_from
 
     # ── USER FILTER ──────────────────────────────────────────────────────────
-    activity_user = filters.get("activity_user") or ""
-    full_name     = ""
+    activity_user        = filters.get("activity_user") or ""
+    full_name            = ""
     if activity_user:
         full_name = frappe.db.get_value("User", activity_user, "full_name") or ""
 
     # ── CALL LOGS ────────────────────────────────────────────────────────────
+    # call_start_time stored as DD-MM-YYYY HH:MM:SS string
     call_conditions = """
-        DATE(call_start_time) BETWEEN %(from)s AND %(to)s
+        STR_TO_DATE(call_start_time, '%d-%m-%Y %H:%i:%s')
+            BETWEEN %(from)s AND %(to)s
         AND call_start_time IS NOT NULL
+        AND call_start_time != ''
     """
     call_params = {
-        "from": str(date_from),
-        "to":   str(date_to)
+        "from": str(date_from) + " 00:00:00",
+        "to":   str(date_to)   + " 23:59:59"
     }
 
-    if activity_user:
-        # from_number stores email directly
-        call_conditions += " AND from_number = %(user)s"
-        call_params["user"] = activity_user
+    if activity_user and full_name:
+        # call_from stores Full Name ("Varsha Goyal")
+        call_conditions += " AND call_from = %(call_from_name)s"
+        call_params["call_from_name"] = full_name
 
     try:
         call_logs = frappe.db.sql(f"""
             SELECT
-                from_number,
+                call_from,
                 lead_id,
                 call_type,
                 call_duration,
                 call_start_time
             FROM `tabCall Logs List`
             WHERE {call_conditions}
-            ORDER BY call_start_time DESC
+            ORDER BY STR_TO_DATE(call_start_time, '%d-%m-%Y %H:%i:%s') DESC
             LIMIT 2000
         """, call_params, as_dict=True)
     except Exception as e:
         frappe.log_error(f"Sales Effort Report – Call Logs fetch failed: {e}")
         call_logs = []
 
-    # ── ACTIVITIES (child table of Lead) ─────────────────────────────────────
+    # ── BUILD CALL DURATION MAP ───────────────────────────────────────────────
+    # keyed by full_name since call_from stores full name
+    call_duration_map = {}
+
+    for c in call_logs:
+        if not c.call_start_time:
+            continue
+
+        user_key      = c.call_from or "Unknown"
+        start_dt      = parse_datetime_safe(c.call_start_time)
+        duration_secs = parse_duration_to_secs(c.call_duration)
+
+        if user_key not in call_duration_map:
+            call_duration_map[user_key] = []
+
+        if start_dt:
+            call_duration_map[user_key].append({
+                "start":         start_dt,
+                "duration_secs": duration_secs
+            })
+
+    # ── ACTIVITIES ───────────────────────────────────────────────────────────
     act_filters = {
-        "parenttype":    "Lead",                                          # ← critical for child table
+        "parenttype":    "Lead",
         "activity_time": ["between", [str(date_from), str(date_to)]]
     }
     if activity_user:
-        act_filters["comment_by"] = activity_user                        # stores email directly
+        act_filters["comment_by"] = activity_user   # stores email
 
     try:
         activities = frappe.get_list(
@@ -137,57 +198,29 @@ def get_data(filters):
         lead_changes = []
 
     # ── BUILD TIMELINE ────────────────────────────────────────────────────────
-    timeline          = []
-    call_duration_map = {}  # user → list of {start, duration_secs}
+    timeline       = []
+    user_name_cache = {}
 
-    # CALL LOGS
-    for c in call_logs:
-        if not c.call_start_time:
-            continue
+    def get_display_name(email):
+        if not email:
+            return "Unknown"
+        if email not in user_name_cache:
+            user_name_cache[email] = frappe.db.get_value("User", email, "full_name") or email
+        return user_name_cache[email]
 
-        user_key = c.from_number or "Unknown"
-        start_dt = parse_datetime_safe(c.call_start_time)
-        end_dt   = parse_datetime_safe(c.call_duration)  # call_duration = end datetime
-
-        duration_secs = 0
-        duration_str  = "Unknown"
-
-        if start_dt and end_dt and end_dt > start_dt:
-            duration_secs = int((end_dt - start_dt).total_seconds())
-            mins          = duration_secs // 60
-            secs          = duration_secs % 60
-            duration_str  = f"{mins}m {secs}s"
-
-        if user_key not in call_duration_map:
-            call_duration_map[user_key] = []
-
-        if start_dt:
-            call_duration_map[user_key].append({
-                "start":         start_dt,
-                "duration_secs": duration_secs
-            })
-            timeline.append({
-                "time":    start_dt,
-                "user":    user_key,
-                "doctype": "Lead",
-                "docname": c.lead_id or "",
-                "action":  f"📞 Call: {c.call_type or 'Unknown'} | Duration: {duration_str}",
-            })
-
-    # ACTIVITIES
     for a in activities:
         if not a.activity_time:
             continue
-        user_val = a.comment_by or a.owner or "Unknown"
+        email    = a.comment_by or a.owner or ""
         timeline.append({
-            "time":    a.activity_time,
-            "user":    user_val,
-            "doctype": "Lead",
-            "docname": a.get("parent") or "",
-            "action":  f"Activity: {a.activity_comment or ''}",
+            "time":       a.activity_time,
+            "user":       get_display_name(email),
+            "user_key":   get_display_name(email),   # full name → matches call_duration_map key
+            "doctype":    "Lead",
+            "docname":    a.get("parent") or "",
+            "action":     a.activity_comment or "",
         })
 
-    # VERSION LOG
     for v in lead_changes:
         if not v.data:
             continue
@@ -199,12 +232,14 @@ def get_data(filters):
             field_name = change[0] or ""
             old_val    = change[1]
             new_val    = change[2]
+            email      = v.owner or ""
             timeline.append({
-                "time":    v.creation,
-                "user":    v.owner or "Unknown",
-                "doctype": "Lead",
-                "docname": v.get("docname") or "",
-                "action":  f"{field_name}: {old_val} → {new_val}",
+                "time":     v.creation,
+                "user":     get_display_name(email),
+                "user_key": get_display_name(email),
+                "doctype":  "Lead",
+                "docname":  v.get("docname") or "",
+                "action":   f"{field_name}: {old_val} → {new_val}",
             })
 
     # ── SORT newest → oldest ──────────────────────────────────────────────────
@@ -221,10 +256,11 @@ def get_data(filters):
         if not dt:
             continue
 
-        dt       = parse_datetime_safe(dt) or dt
-        user     = row["user"]
-        row_date = getdate(dt)
-        time_str = dt.strftime("%H:%M")
+        dt        = parse_datetime_safe(dt) or dt
+        user      = row["user"]       # full name for display
+        user_key  = row["user_key"]   # full name for call map lookup
+        row_date  = getdate(dt)
+        time_str  = dt.strftime("%H:%M")
 
         # ── USER heading ──
         if user != last_user:
@@ -246,22 +282,22 @@ def get_data(filters):
                 "idle_time": "", "doctype": "", "docname": "", "action": ""
             })
             last_row_date = row_date
-            prev_time     = None
+            prev_time     = None   # reset — prevents cross-date idle bug
             prev_row_user = None
 
-        # ── IDLE TIME (call-aware + 1 min buffer per call) ──
+        # ── IDLE TIME ──
         idle = ""
-        if prev_time and prev_row_user == user and getdate(prev_time) == row_date:
+        if prev_time and prev_row_user == user_key and getdate(prev_time) == row_date:
             gap_secs         = (prev_time - dt).total_seconds()
             calls_in_gap     = 0
             call_secs_in_gap = 0
 
-            for c in call_duration_map.get(user, []):
+            for c in call_duration_map.get(user_key, []):
                 if c["start"] and dt <= c["start"] <= prev_time:
                     calls_in_gap     += 1
                     call_secs_in_gap += c["duration_secs"]
 
-            buffer_secs    = calls_in_gap * 60  # 1 min buffer per call
+            buffer_secs    = calls_in_gap * 60
             true_idle_secs = gap_secs - call_secs_in_gap - buffer_secs
             true_idle_mins = true_idle_secs / 60
 
@@ -271,9 +307,8 @@ def get_data(filters):
                 idle = f"{int(true_idle_mins)} Mins"
 
         prev_time     = dt
-        prev_row_user = user
+        prev_row_user = user_key
 
-        # ── DATA ROW ──
         data.append({
             "activity":  time_str,
             "idle_time": idle,
@@ -283,4 +318,4 @@ def get_data(filters):
             "indent":    2,
         })
 
-    return data 
+    return data
