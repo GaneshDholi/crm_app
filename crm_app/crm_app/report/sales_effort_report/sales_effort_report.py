@@ -265,7 +265,7 @@ def get_data(filters):
         # ── USER heading ──
         if user != last_user:
             data.append({
-                "activity":  f"▶ {user}",
+                "activity":  f"{user}",
                 "indent":    0,
                 "idle_time": "", "doctype": "", "docname": "", "action": ""
             })

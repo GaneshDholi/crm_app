@@ -122,9 +122,15 @@
  "report_script": "",
  "report_type": "Script Report",
  "roles": [
-  {
-   "role": "System Manager"
-  }
- ],
+    {
+        "role": "System Manager"
+    },
+    {
+        "role": "Sales User"
+    },
+    {
+        "role": "Sales Manager"
+    }
+    ],
  "timeout": 0
 }
